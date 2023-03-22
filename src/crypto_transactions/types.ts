@@ -16,14 +16,14 @@ export type TSellerId = number;
 export type TWalletScore = number;
 
 export interface ITransactionRequest {
+    fromWallet: IWallet;
+    toWallet: IWallet;
     amount: number;
     score: number;
 }
 
 export interface ITransaction extends ITransactionRequest {
     id: string;
-    fromWallet: IWallet;
-    toWaller: IWallet;
 }
 
 export interface IBlockedTransaction {
@@ -33,7 +33,7 @@ export interface IBlockedTransaction {
 }
 
 export interface ISeller {
-    sellerId: TSellerId;
+    id: TSellerId;
     sellerName: string;
 }
 
