@@ -5,21 +5,21 @@ export const WALLET_STATE = {
 
 export const BLOCKAGE_REASONS = {
     SENT_TO_BLOCKED_WALLET: 'SENT_TO_BLOCKED_WALLET',
-    INTERNAL_RANK_EXCEEDED_THRESHOLD: 'INTERNAL_RANK_EXCEEDED_THRESHOLD',
-    EXTERNAL_RANK_EXCEEDED_THRESHOLD: 'EXTERNAL_RANK_EXCEEDED_THRESHOLD'
+    EXCEEDED_RISK_RANK_LIMIT: 'EXCEEDED_RISK_RANK_LIMIT',
 } as const;
+
 
 export type ObjectValues<TObject> = TObject[keyof TObject];
 export type TWalletState = ObjectValues<typeof WALLET_STATE>
 export type TBlockageReasons = ObjectValues<typeof BLOCKAGE_REASONS>
 export type TSellerId = number;
-export type TWalletScore = number;
+export type TWalletRank = number;
 
 export interface ITransactionRequest {
     fromWallet: IWallet;
     toWallet: IWallet;
     amount: number;
-    score: number;
+    rank: number;
 }
 
 export interface ITransaction extends ITransactionRequest {
@@ -28,7 +28,7 @@ export interface ITransaction extends ITransactionRequest {
 
 export interface IBlockedTransaction {
     walletId: IWallet;
-    score: TWalletScore;
+    score: TWalletRank;
     blockReason: TBlockageReasons;
 }
 
@@ -40,7 +40,8 @@ export interface ISeller {
 export interface IWallet {
     seller: ISeller,
     status: TWalletState,
-    Score: TWalletScore,
+    riskRank: TWalletRank,
+    isInternal: boolean,
     transactions: ITransaction[] | undefined;
     blockageReason?: TBlockageReasons,
 }
