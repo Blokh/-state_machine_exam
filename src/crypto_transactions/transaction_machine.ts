@@ -1,10 +1,25 @@
-import {BLOCKAGE_REASONS, ITransaction, ITransactionRequest, IWallet, TBlockageReasons, WALLET_STATE} from './types'
+import {
+    BLOCKAGE_REASONS,
+    ITransaction,
+    ITransactionRequest,
+    IWallet,
+    TBlockageReasons,
+    TWalletRank,
+    WALLET_STATE
+} from './types'
 import {assign, createMachine} from "xstate";
 import {v4 as uuidv4} from 'uuid';
-import {after} from "xstate/es/actions";
+
+const INTERNAL_LIMIT_THRESHOLD = 300;
+const EXTERNAL_LIMIT_THRESHOLD = 100;
+const INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK = 15;
+const EXTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK = 10;
 
 let runningSellerTransaction = []
 
+const persistRankToWaller = (wallet: IWallet, rank: TWalletRank ) => {
+    // update wallet rank
+}
 const isReceivingSellerBlocked = (request: ITransactionRequest | ITransaction) => {
     return request.toWallet.status == WALLET_STATE.BLOCKED
 }
@@ -24,6 +39,19 @@ const assignSendingInTransaction = (transactionRequest: ITransactionRequest) : I
     return transaction
 }
 
+const calculateBlockedTransactionNewRiskCount = (transaction: ITransaction) => {
+    if (transaction.toWallet.isInternal) {
+        persistRankToWaller(transaction.fromWallet, calculateRankPercentageValue(transaction.fromWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
+        persistRankToWaller(transaction.toWallet, calculateRankPercentageValue(transaction.toWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
+    }else {
+        persistRankToWaller(transaction.fromWallet, calculateRankPercentageValue(transaction.fromWallet.riskRank, EXTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
+    }
+}
+
+const calculateRankPercentageValue = (rank: TWalletRank, percentage: number): TWalletRank => {
+    return percentage / 100 * rank
+}
+
 const blockSenderWallet = (transactionRequest: ITransactionRequest, walletBlockageReason: TBlockageReasons): void => {
     let sendingWallet = transactionRequest.fromWallet
     sendingWallet.status = WALLET_STATE.BLOCKED;
@@ -37,31 +65,40 @@ const transactionMachine = createMachine({
     context: {
         transactionRequest: undefined,
         transaction: undefined,
+        transactionConfiguration: undefined,
         walletBlockReason: undefined,
     },
     states: {
-        PENDING_TRANSACTION: {
+        pendingTransaction: {
             on: {
                 'TRANSACTION_REQUESTED': [
-                    { target: 'BLOCK_SENDER_WALLET', cond: 'unauthorizedReceiverWallet' },
-                    { target: 'TRANSACTION_RETRY_IN_60', cond: 'isTransactionFromWalletAlreadyEnqueued' },
-                    { actions: 'assignSendingInTransaction', target: 'FETCH_TRANSACTION_CONFIGURATION' },
+                    { target: 'blockSenderWallet', cond: 'unauthorizedReceiverWallet' },
+                    { target: 'reEnqueueTransaction', cond: 'isTransactionFromWalletAlreadyEnqueued' },
+                    { actions: 'assignSendingInTransaction', target: 'validateTransaction' },
                 ]
             },
         },
-        BLOCK_SENDER_WALLET: {
+        blockSenderWallet: {
             on: {
                 action: 'blockSenderWallet',
-                target: 'UNLOCK_SENDER_WALLET'
+                target: 'unlockSenderWallet'
             }
         },
-        TRANSACTION_RETRY_IN_60: {
-            on: { target: 'PENDING_TRANSACTION'},
+        reEnqueueTransaction: {
+            always: { target: 'pendingTransaction'},
             after: { 60000: [ {target: 'TRANSACTION_REQUESTED'}]},
         },
-        RE_ENQUEUE_TRANSACTION: {},
-        FETCH_TRANSACTION_CONFIGURATION: {},
-        ENQUEUE_TRANSACTION: {},
+        validateTransaction: {
+            always: [
+                {target: 'enqueueTransaction', cond: ['isFromInternalToExternal', 'isTransactionFitsExternalConfiguration'], actions: 'persistSumOfRanksToSendingWallet'},
+                {target: 'blockTransaction', cond: 'isFromInternalToExternal', actions: 'persistSumOfRanksToSendingWallet'},
+                {target: 'enqueueTransaction', cond: 'isTransactionFitsInternalConfiguration'},
+                {target: 'blockTransaction'},
+
+            ]
+        },
+        enqueueTransaction: {},
+        blockTransaction: {},
         PERSIST_TRANSACTION_TO_WALLETS: {},
         PERSIST_NEW_SENDER_WALLET_RANK: {},
         UNLOCK_SENDER_WALLET: {
@@ -73,19 +110,43 @@ const transactionMachine = createMachine({
         assignSendingInTransaction: (context, event) => {
             assign({transaction: assignSendingInTransaction(context.transactionRequest)})
         },
-        blockSenderWallet: (context, event) => blockSenderWallet(context.transactionRequest, context.walletBlockReason)
+        blockSenderWallet: (context, event) => blockSenderWallet(context.transactionRequest, context.walletBlockReason),
+        persistSumOfRanksToSendingWallet: (context, event) => {
+            let summedRank = context.transaction.fromWallet.riskRank + context.transaction.toWallet.riskRank
+            persistRankToWaller(context.transaction.fromWallet, summedRank)
+            context.transaction.fromWallet.riskRank = summedRank
+        }
     },
     guards: {
         unauthorizedReceiverWallet: (context, event) => {
-            if (isReceivingSellerBlocked(context.transactionRequest as ITransaction)) {
+            if (isReceivingSellerBlocked(context.transactionRequest)) {
                 assign({walletBlockReason: BLOCKAGE_REASONS.SENT_TO_BLOCKED_WALLET})
+
+                return true
+            } else if (context.transactionRequest.fromWallet.score > 600) {
+                assign({walletBlockReason: BLOCKAGE_REASONS.EXCEEDED_RISK_RANK_LIMIT})
 
                 return true
             }
             return false
         },
         isTransactionFromWalletAlreadyEnqueued: (context, event) => {
-            return true;
+            return isTransactionFromWalletAlreadyEnqueued(context.transactionRequest)
+        },
+        isFromInternalToExternal: (context, event) => {
+            return !context.transaction.toWallet.isInternal
+        },
+        isTransactionFitsInternalConfiguration: (context, event) => {
+            let transactionRiskRank = context.transaction.fromWallet.riskRank + context.transaction.toWallet.riskRank;
+
+            return context.transaction.toWallet.status == WALLET_STATE.ACTIVE && transactionRiskRank < INTERNAL_LIMIT_THRESHOLD
+        },
+        isTransactionFitsExternalConfiguration: (context, event) => {
+            let transactionRiskRank = context.transaction.fromWallet.riskRank + context.transaction.toWallet.riskRank;
+
+            return context.transaction.toWallet.status == WALLET_STATE.ACTIVE && transactionRiskRank < EXTERNAL_LIMIT_THRESHOLD
         }
+
+
     }
 });
