@@ -1,6 +1,7 @@
-import {ITransaction, ITransactionRequest, IWallet, TBlockageReasons, WALLET_STATE} from './types'
+import {BLOCKAGE_REASONS, ITransaction, ITransactionRequest, IWallet, TBlockageReasons, WALLET_STATE} from './types'
 import {assign, createMachine} from "xstate";
 import {v4 as uuidv4} from 'uuid';
+import {after} from "xstate/es/actions";
 
 let runningSellerTransaction = []
 
@@ -23,7 +24,7 @@ const assignSendingInTransaction = (transactionRequest: ITransactionRequest) : I
     return transaction
 }
 
-const blockSellerWallet = (transactionRequest: ITransactionRequest, walletBlockageReason: TBlockageReasons): void => {
+const blockSenderWallet = (transactionRequest: ITransactionRequest, walletBlockageReason: TBlockageReasons): void => {
     let sendingWallet = transactionRequest.fromWallet
     sendingWallet.status = WALLET_STATE.BLOCKED;
     sendingWallet.blockageReason = walletBlockageReason;
@@ -32,56 +33,59 @@ const blockSellerWallet = (transactionRequest: ITransactionRequest, walletBlocka
 const transactionMachine = createMachine({
     id: 'TRANSACTION_MACHINE',
     initial: 'PENDING_TRANSACTION',
+    predictableActionArguments: true,
+    context: {
+        transactionRequest: undefined,
+        transaction: undefined,
+        walletBlockReason: undefined,
+    },
     states: {
         PENDING_TRANSACTION: {
             on: {
                 'TRANSACTION_REQUESTED': [
-                    {
-                        target: 'BLOCK_SENDER_WALLET',
-                        cond: 'unauthorizedReceiverWallet'
-                        // action: 'calculateBlockageReason'
-                    },
-                    {
-                        target: 'RE_ENQUEUE_TRANSACTION',
-                        cond: (transactionRequest: ITransactionRequest) => isTransactionFromWalletAlreadyEnqueued(transactionRequest)
-                    },
-                    {
-                        target: 'FETCH_TRANSACTION_CONFIGURATION',
-                        action: 'assignSendingInTransaction'
-                    }
+                    { target: 'BLOCK_SENDER_WALLET', cond: 'unauthorizedReceiverWallet' },
+                    { target: 'TRANSACTION_RETRY_IN_60', cond: 'isTransactionFromWalletAlreadyEnqueued' },
+                    { actions: 'assignSendingInTransaction', target: 'FETCH_TRANSACTION_CONFIGURATION' },
                 ]
             },
         },
-
-        BLOCK_SENDER_WALLET: {},
+        BLOCK_SENDER_WALLET: {
+            on: {
+                action: 'blockSenderWallet',
+                target: 'UNLOCK_SENDER_WALLET'
+            }
+        },
+        TRANSACTION_RETRY_IN_60: {
+            on: { target: 'PENDING_TRANSACTION'},
+            after: { 60000: [ {target: 'TRANSACTION_REQUESTED'}]},
+        },
         RE_ENQUEUE_TRANSACTION: {},
         FETCH_TRANSACTION_CONFIGURATION: {},
         ENQUEUE_TRANSACTION: {},
         PERSIST_TRANSACTION_TO_WALLETS: {},
         PERSIST_NEW_SENDER_WALLET_RANK: {},
-        UNBLOCK_SENDER_WALLET: {},
+        UNLOCK_SENDER_WALLET: {
+            type: "final"
+        },
     }
 }, {
     actions: {
         assignSendingInTransaction: (context, event) => {
-            assignSendingInTransaction(context as ITransactionRequest)
-        }
+            assign({transaction: assignSendingInTransaction(context.transactionRequest)})
+        },
+        blockSenderWallet: (context, event) => blockSenderWallet(context.transactionRequest, context.walletBlockReason)
     },
     guards: {
         unauthorizedReceiverWallet: (context, event) => {
-            return isReceivingSellerBlocked(context as ITransaction)
+            if (isReceivingSellerBlocked(context.transactionRequest as ITransaction)) {
+                assign({walletBlockReason: BLOCKAGE_REASONS.SENT_TO_BLOCKED_WALLET})
+
+                return true
+            }
+            return false
         },
+        isTransactionFromWalletAlreadyEnqueued: (context, event) => {
+            return true;
+        }
     }
 });
-
-
-// const remittanceMachine = createMachine({
-//     on: {
-//         'NEW_TRNASACTION_REQUEST': {
-//             // actions: assign({transactionRequest: (context, event) => {
-//             //     ...context.requests
-//             //     }})
-//         },
-//
-//     }
-// })
