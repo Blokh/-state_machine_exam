@@ -39,9 +39,10 @@ export interface ISeller {
 
 export interface IWallet {
     seller: ISeller,
-    State: TWalletState,
+    status: TWalletState,
     Score: TWalletScore,
     transactions: ITransaction[] | undefined;
+    blockageReason?: TBlockageReasons,
 }
 
 

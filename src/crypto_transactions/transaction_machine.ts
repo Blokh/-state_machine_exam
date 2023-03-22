@@ -1,11 +1,11 @@
-import {ITransaction, ITransactionRequest} from './types'
+import {ITransaction, ITransactionRequest, IWallet, TBlockageReasons, WALLET_STATE} from './types'
 import {assign, createMachine} from "xstate";
 import {v4 as uuidv4} from 'uuid';
 
 let runningSellerTransaction = []
 
 const isReceivingSellerBlocked = (request: ITransactionRequest | ITransaction) => {
-    return request.toWallet.State == 'blocked'
+    return request.toWallet.status == WALLET_STATE.BLOCKED
 }
 
 const isTransactionFromWalletAlreadyEnqueued = (transactionRequest: ITransactionRequest) : boolean => {
@@ -21,6 +21,12 @@ const assignSendingInTransaction = (transactionRequest: ITransactionRequest) : I
 
     runningSellerTransaction = runningSellerTransaction.concat(transactionRequest.fromWallet.seller.id)
     return transaction
+}
+
+const blockSellerWallet = (transactionRequest: ITransactionRequest, walletBlockageReason: TBlockageReasons): void => {
+    let sendingWallet = transactionRequest.fromWallet
+    sendingWallet.status = WALLET_STATE.BLOCKED;
+    sendingWallet.blockageReason = walletBlockageReason;
 }
 
 const transactionMachine = createMachine({
@@ -48,6 +54,7 @@ const transactionMachine = createMachine({
         },
 
         BLOCK_SENDER_WALLET: {},
+        RE_ENQUEUE_TRANSACTION: {},
         FETCH_TRANSACTION_CONFIGURATION: {},
         ENQUEUE_TRANSACTION: {},
         PERSIST_TRANSACTION_TO_WALLETS: {},
