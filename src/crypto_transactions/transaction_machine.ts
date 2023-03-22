@@ -3,7 +3,7 @@ import {
     ITransaction,
     ITransactionRequest,
     IWallet,
-    TBlockageReasons,
+    TBlockageReasons, TSellerId,
     TWalletRank,
     WALLET_STATE
 } from './types'
@@ -15,9 +15,10 @@ const EXTERNAL_LIMIT_THRESHOLD = 100;
 const INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK = 15;
 const EXTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK = 10;
 
-let runningSellerTransaction = []
+let runningSellerTransaction = {}
 
-const persistRankToWaller = (wallet: IWallet, rank: TWalletRank ) => {
+const persistRankToWallet = (wallet: IWallet, rank: TWalletRank ) => {
+    wallet.riskRank = rank
     // update wallet rank
 }
 const isReceivingSellerBlocked = (request: ITransactionRequest | ITransaction) => {
@@ -25,7 +26,7 @@ const isReceivingSellerBlocked = (request: ITransactionRequest | ITransaction) =
 }
 
 const isTransactionFromWalletAlreadyEnqueued = (transactionRequest: ITransactionRequest) : boolean => {
-    let isSellerAlreadySending = runningSellerTransaction.includes(transactionRequest.fromWallet.seller.id);
+    let isSellerAlreadySending = runningSellerTransaction[fetchSellerIdFromTransaction(transactionRequest)];
 
     return isSellerAlreadySending
 }
@@ -35,16 +36,27 @@ const assignSendingInTransaction = (transactionRequest: ITransactionRequest) : I
     const transaction = transactionRequest as ITransaction
     transaction.id = transactionId
 
-    runningSellerTransaction = runningSellerTransaction.concat(transactionRequest.fromWallet.seller.id)
     return transaction
+}
+
+const fetchSellerIdFromTransaction = (transaction: ITransactionRequest | ITransaction): TSellerId => {
+    return transaction.fromWallet.seller.id
+}
+const lockSenderInTransaction = (transactionRequest: ITransactionRequest) : void => {
+    let sellerId = fetchSellerIdFromTransaction(transactionRequest);
+    runningSellerTransaction[sellerId] = sellerId
+}
+const unlockSenderInTransaction = (transactionRequest: ITransactionRequest) : void => {
+    let sellerId = fetchSellerIdFromTransaction(transactionRequest);
+    delete runningSellerTransaction[sellerId]
 }
 
 const calculateBlockedTransactionNewRiskCount = (transaction: ITransaction) => {
     if (transaction.toWallet.isInternal) {
-        persistRankToWaller(transaction.fromWallet, calculateRankPercentageValue(transaction.fromWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
-        persistRankToWaller(transaction.toWallet, calculateRankPercentageValue(transaction.toWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
+        persistRankToWallet(transaction.fromWallet, calculateRankPercentageValue(transaction.fromWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
+        persistRankToWallet(transaction.toWallet, calculateRankPercentageValue(transaction.toWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
     }else {
-        persistRankToWaller(transaction.fromWallet, calculateRankPercentageValue(transaction.fromWallet.riskRank, EXTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
+        persistRankToWallet(transaction.fromWallet, calculateRankPercentageValue(transaction.fromWallet.riskRank, EXTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
     }
 }
 
@@ -58,9 +70,19 @@ const blockSenderWallet = (transactionRequest: ITransactionRequest, walletBlocka
     sendingWallet.blockageReason = walletBlockageReason;
 }
 
+function isExternalTransaction(transaction) {
+    return !transaction.toWallet.isInternal;
+}
+
+function isExternalTransactionFitsLimits(transaction) {
+    let transactionRiskRank = transaction.fromWallet.riskRank + transaction.toWallet.riskRank;
+
+    return transaction.toWallet.status == WALLET_STATE.ACTIVE && transactionRiskRank < EXTERNAL_LIMIT_THRESHOLD
+}
+
 const transactionMachine = createMachine({
     id: 'TRANSACTION_MACHINE',
-    initial: 'PENDING_TRANSACTION',
+    initial: 'pendingTransaction',
     predictableActionArguments: true,
     context: {
         transactionRequest: undefined,
@@ -72,53 +94,58 @@ const transactionMachine = createMachine({
         pendingTransaction: {
             on: {
                 'TRANSACTION_REQUESTED': [
-                    { target: 'blockSenderWallet', cond: 'unauthorizedReceiverWallet' },
+                    { target: 'blockSenderWallet', cond: 'shouldBlockWallet' },
                     { target: 'reEnqueueTransaction', cond: 'isTransactionFromWalletAlreadyEnqueued' },
-                    { actions: 'assignSendingInTransaction', target: 'validateTransaction' },
+                    {  target: 'validateTransaction', actions: ['lockSenderInTransaction', 'assignSendingInTransaction'] },
                 ]
             },
         },
-        blockSenderWallet: {
-            on: {
-                action: 'blockSenderWallet',
-                target: 'unlockSenderWallet'
-            }
-        },
         reEnqueueTransaction: {
             always: { target: 'pendingTransaction'},
-            after: { 60000: [ {target: 'TRANSACTION_REQUESTED'}]},
+            after: { 5000: [ {target: 'TRANSACTION_REQUESTED'}]}, // here I wanted to send an event once again after a 5 seconds unfortunately could not find how
         },
         validateTransaction: {
             always: [
-                {target: 'enqueueTransaction', cond: ['isFromInternalToExternal', 'isTransactionFitsExternalConfiguration'], actions: 'persistSumOfRanksToSendingWallet'},
+                {target: 'enqueueTransaction', cond: 'externalTransactionValid', actions: 'persistSumOfRanksToSendingWallet'}, // could not find the reason why it does not allow double condintions to be executed
                 {target: 'blockTransaction', cond: 'isFromInternalToExternal', actions: 'persistSumOfRanksToSendingWallet'},
                 {target: 'enqueueTransaction', cond: 'isTransactionFitsInternalConfiguration'},
                 {target: 'blockTransaction'},
 
             ]
         },
-        enqueueTransaction: {},
-        blockTransaction: {},
-        PERSIST_TRANSACTION_TO_WALLETS: {},
-        PERSIST_NEW_SENDER_WALLET_RANK: {},
-        UNLOCK_SENDER_WALLET: {
-            type: "final"
+        blockSenderWallet: {
+            on: {
+                action: 'blockSenderWallet',
+                target: 'unlockSenderTransaction'
+            }
         },
+        enqueueTransaction: {on: {target: 'unlockSenderTransaction', action: 'persistTransactionsToWallets'}},
+        blockTransaction: {on: {target: 'unlockSenderTransaction', action: 'persistNewRankToWallet'}},
+        unlockSenderTransaction: {on: {target: 'pendingTransaction', action: 'unlockSenderInTransaction'}},
     }
 }, {
     actions: {
+        lockSenderInTransaction: (context, event) => {
+            assign({transaction: lockSenderInTransaction(context.transactionRequest)})
+        },
         assignSendingInTransaction: (context, event) => {
             assign({transaction: assignSendingInTransaction(context.transactionRequest)})
         },
         blockSenderWallet: (context, event) => blockSenderWallet(context.transactionRequest, context.walletBlockReason),
         persistSumOfRanksToSendingWallet: (context, event) => {
             let summedRank = context.transaction.fromWallet.riskRank + context.transaction.toWallet.riskRank
-            persistRankToWaller(context.transaction.fromWallet, summedRank)
+            persistRankToWallet(context.transaction.fromWallet, summedRank)
             context.transaction.fromWallet.riskRank = summedRank
+        }, persistNewRankToWallet: (context, event) => {
+            calculateBlockedTransactionNewRiskCount(context.transaction)
+        }, unlockSenderInTransaction: (context, event) => {
+            unlockSenderInTransaction(context.transaction)
+        }, persistTransactionsToWallets: (context, event) => {
+            // persistTransactionToWallet
         }
     },
     guards: {
-        unauthorizedReceiverWallet: (context, event) => {
+        shouldBlockWallet: (context, event) => {
             if (isReceivingSellerBlocked(context.transactionRequest)) {
                 assign({walletBlockReason: BLOCKAGE_REASONS.SENT_TO_BLOCKED_WALLET})
 
@@ -130,23 +157,20 @@ const transactionMachine = createMachine({
             }
             return false
         },
+
         isTransactionFromWalletAlreadyEnqueued: (context, event) => {
             return isTransactionFromWalletAlreadyEnqueued(context.transactionRequest)
         },
         isFromInternalToExternal: (context, event) => {
-            return !context.transaction.toWallet.isInternal
+            return isExternalTransaction(context)
+        },externalTransactionValid: (context, event) => {
+            return isExternalTransaction(context.transaction) && isExternalTransactionFitsLimits(context.transaction)
         },
         isTransactionFitsInternalConfiguration: (context, event) => {
-            let transactionRiskRank = context.transaction.fromWallet.riskRank + context.transaction.toWallet.riskRank;
+            let transaction = context.transaction;
+            let transactionRiskRank = transaction.fromWallet.riskRank + transaction.toWallet.riskRank;
 
-            return context.transaction.toWallet.status == WALLET_STATE.ACTIVE && transactionRiskRank < INTERNAL_LIMIT_THRESHOLD
+            return transaction.toWallet.status == WALLET_STATE.ACTIVE && transactionRiskRank < INTERNAL_LIMIT_THRESHOLD
         },
-        isTransactionFitsExternalConfiguration: (context, event) => {
-            let transactionRiskRank = context.transaction.fromWallet.riskRank + context.transaction.toWallet.riskRank;
-
-            return context.transaction.toWallet.status == WALLET_STATE.ACTIVE && transactionRiskRank < EXTERNAL_LIMIT_THRESHOLD
-        }
-
-
     }
 });
