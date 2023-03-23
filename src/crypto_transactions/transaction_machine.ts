@@ -53,15 +53,16 @@ const unlockSenderInTransaction = (transactionRequest: ITransactionRequest) : vo
 
 const calculateBlockedTransactionNewRiskCount = (transaction: ITransaction) => {
     if (transaction.toWallet.isInternal) {
-        persistRankToWallet(transaction.fromWallet, calculateRankPercentageValue(transaction.fromWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
-        persistRankToWallet(transaction.toWallet, calculateRankPercentageValue(transaction.toWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
+        persistRankToWallet(transaction.fromWallet, calculateAddedRankPercentageValue(transaction.fromWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
+        persistRankToWallet(transaction.toWallet, calculateAddedRankPercentageValue(transaction.toWallet.riskRank, INTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
     }else {
-        persistRankToWallet(transaction.fromWallet, calculateRankPercentageValue(transaction.fromWallet.riskRank, EXTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
+        persistRankToWallet(transaction.fromWallet, calculateAddedRankPercentageValue(transaction.fromWallet.riskRank, EXTERNAL_PERCENTAGE_ADDITIONAL_RISK_ON_BLOCK))
     }
 }
 
-const calculateRankPercentageValue = (rank: TWalletRank, percentage: number): TWalletRank => {
-    return percentage / 100 * rank
+const calculateAddedRankPercentageValue = (riskRank: TWalletRank, percentage: number): TWalletRank => {
+    let additional_riskRank = percentage / 100 * riskRank;
+    return additional_riskRank + riskRank
 }
 
 const blockSenderWallet = (transactionRequest: ITransactionRequest, walletBlockageReason: TBlockageReasons): void => {
